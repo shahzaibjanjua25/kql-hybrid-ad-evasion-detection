@@ -1,0 +1,30 @@
+# Environment
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Azure deployment outputs
+deployment/output/
+*.deployment.json
+
+# Test artifacts
+testing/results/
+testing/__pycache__/
+
+# Secrets
+*.secrets.json
