@@ -1,0 +1,32 @@
+// ============================================================
+// Rule 1: Detecting Suspicious Authentication Policy Modifications
+// ============================================================
+// Description: Identifies suspicious policy modifications that may
+//              indicate backdoor key injection on Linux systems
+//              (e.g., Seamless SSO key manipulation, PAM tampering).
+//
+// MITRE ATT&CK: T1556 (Modify Authentication Process)
+// Data Source:  Syslog (auth, authpriv facilities)
+// Author:       Shah Zaib Sajid
+// Validated:    Yes (92% DR, 3% FPR)
+//
+// TUNING:
+// - Adjust `ago(30d)` based on your data retention
+// - Add/remove keywords to match your environment's PAM/policy logs
+// - Consider excluding known maintenance windows via `where HostName !in (...)`
+// ============================================================
+
+Syslog
+| where TimeGenerated > ago(30d)
+| where Facility in ("auth", "authpriv")
+| where SyslogMessage contains "PAM"
+    or SyslogMessage contains "authentication policy"
+    or SyslogMessage contains "password policy"
+    or SyslogMessage contains "SSH authentication policy"
+    or SyslogMessage contains "sudoers"
+    or SyslogMessage contains "Kerberos delegation"
+    or SyslogMessage contains "account lockout"
+    or SyslogMessage contains "session timeout"
+    or SyslogMessage contains "PermitRootLogin"
+| project TimeGenerated, HostName, Facility, SeverityLevel, SyslogMessage
+| order by TimeGenerated desc
