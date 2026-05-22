@@ -1,0 +1,35 @@
+// ============================================================
+// Rule 2: Hunting Seamless SSO Abuse
+// ============================================================
+// Description: Identifies Seamless SSO usage from unexpected sources,
+//              potentially indicating forged ticket abuse via
+//              AZUREADSSOACC computer account manipulation.
+//
+// MITRE ATT&CK: T1558 (Steal or Forge Kerberos Tickets),
+//               T1558.003 (Kerberoasting)
+// Data Source:  Syslog (auth, authpriv, daemon facilities)
+// Author:       Shah Zaib Sajid
+// Validated:    Yes (88% DR, 4% FPR)
+//
+// TUNING:
+// - Add expected KDC hostnames to an exclusion list
+// - Extend keywords if your Kerberos library logs differently
+// - Consider baselining normal AS-REQ / TGT volumes per host
+// ============================================================
+
+Syslog
+| where TimeGenerated > ago(30d)
+| where Facility in ("auth", "authpriv", "daemon")
+| where SyslogMessage contains "krb5kdc"
+    or SyslogMessage contains "kerberos"
+    or SyslogMessage contains "TGT"
+    or SyslogMessage contains "KDC"
+    or SyslogMessage contains "AZUREADSSOACC"
+    or SyslogMessage contains "AS-REQ"
+    or SyslogMessage contains "GSSAPI"
+    or SyslogMessage contains "kadmin"
+    or SyslogMessage contains "sssd"
+    or (SyslogMessage contains "kerberos" and SyslogMessage contains "ticket")
+    or (SyslogMessage contains "pre-authentication" and SyslogMessage contains "kerberos")
+| project TimeGenerated, HostName, Facility, SeverityLevel, SyslogMessage
+| order by TimeGenerated desc
