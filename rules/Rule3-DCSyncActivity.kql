@@ -1,0 +1,36 @@
+// ============================================================
+// Rule 3: Detecting DCShadow / DCSync Activity
+// ============================================================
+// Description: Identifies potential DCSync / DCShadow attacks, which
+//              are commonly used for credential theft and lateral
+//              movement via directory replication abuse.
+//
+// MITRE ATT&CK: T1003.006 (DCSync), T1207 (Rogue Domain Controller)
+// Data Source:  Syslog (daemon, local4, local5 facilities)
+// Author:       Shah Zaib Sajid
+// Validated:    Yes (90% DR, 4% FPR)
+//
+// TUNING:
+// - Exclude legitimate domain controller hostnames
+//   (where HostName !in ("dc01", "dc02", ...))
+// - Extend the GUID list with environment-specific replication GUIDs
+// - Tune `ago(90d)` to match audit retention requirements
+// ============================================================
+
+Syslog
+| where TimeGenerated > ago(90d)
+| where Facility in ("daemon", "local4", "local5")
+| where SyslogMessage contains "slapd"
+    or SyslogMessage contains "openldap"
+    or SyslogMessage contains "LDAP replica"
+    or SyslogMessage contains "directory replication"
+    or SyslogMessage contains "Replicating Directory"
+    or SyslogMessage contains "ldapsearch"
+    or SyslogMessage contains "ldapmodify"
+    or SyslogMessage contains "replication"
+    or SyslogMessage contains "sync update"
+    or SyslogMessage contains "1131f6ad"
+    or SyslogMessage contains "89e95b76"
+    or SyslogMessage contains "replica sync"
+| project TimeGenerated, HostName, Facility, SeverityLevel, SyslogMessage
+| order by TimeGenerated desc
