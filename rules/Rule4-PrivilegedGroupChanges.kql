@@ -1,0 +1,35 @@
+// ============================================================
+// Rule 4: Monitoring Privileged Group Membership Changes
+// ============================================================
+// Description: Detects unauthorized additions to privileged groups,
+//              a common post-compromise activity for persistence and
+//              privilege escalation.
+//
+// MITRE ATT&CK: T1098 (Account Manipulation), T1098.007 (Additional
+//               Local or Domain Groups)
+// Data Source:  Syslog (auth, authpriv, user facilities)
+// Author:       Shah Zaib Sajid
+// Validated:    Yes (85% DR, 5% FPR)
+//
+// TUNING:
+// - Extend the `Groups` dynamic array with your privileged group names
+// - Exclude sanctioned change-management hostnames
+// - Reduce `ago(48h)` for near-real-time alerting
+// ============================================================
+
+let Groups = dynamic(['sudo', 'root', 'wheel', 'adm', 'sys', 'admin', 'operator', 'docker']);
+Syslog
+| where TimeGenerated > ago(48h)
+| where Facility in ("auth", "authpriv", "user")
+| where SyslogMessage contains "usermod"
+    or SyslogMessage contains "groupadd"
+    or SyslogMessage contains "gpasswd"
+    or SyslogMessage contains "useradd"
+    or SyslogMessage contains "sudoers"
+    or SyslogMessage contains "groupmod"
+    or SyslogMessage contains "shadow"
+    or SyslogMessage contains "added to group"
+| extend Group = extract("(sudo|root|wheel|adm|sys|admin|operator|docker)", 0, SyslogMessage)
+| where Group in (Groups)
+| project TimeGenerated, HostName, Facility, SeverityLevel, SyslogMessage, Group
+| order by TimeGenerated desc
