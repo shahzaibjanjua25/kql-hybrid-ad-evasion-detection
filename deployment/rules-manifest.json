@@ -1,0 +1,69 @@
+{
+  "rules": [
+    {
+      "id": "rule-1-auth-policy",
+      "name": "Detecting Suspicious Authentication Policy Modifications",
+      "file": "../rules/Rule1-AuthenticationPolicyModifications.kql",
+      "severity": "Medium",
+      "enabled": true,
+      "mitreTactics": ["DefenseEvasion"],
+      "mitreTechniques": ["T1556"],
+      "queryFrequency": "PT1H",
+      "queryPeriod": "P30D",
+      "triggerOperator": "GreaterThan",
+      "triggerThreshold": 0
+    },
+    {
+      "id": "rule-2-seamless-sso",
+      "name": "Hunting Seamless SSO Abuse",
+      "file": "../rules/Rule2-SeamlessSSOAbuse.kql",
+      "severity": "High",
+      "enabled": true,
+      "mitreTactics": ["CredentialAccess"],
+      "mitreTechniques": ["T1558", "T1558.003"],
+      "queryFrequency": "PT1H",
+      "queryPeriod": "P30D",
+      "triggerOperator": "GreaterThan",
+      "triggerThreshold": 0
+    },
+    {
+      "id": "rule-3-dcsync",
+      "name": "Detecting DCShadow/DCSync Activity",
+      "file": "../rules/Rule3-DCSyncActivity.kql",
+      "severity": "High",
+      "enabled": true,
+      "mitreTactics": ["CredentialAccess", "LateralMovement"],
+      "mitreTechniques": ["T1003.006", "T1207"],
+      "queryFrequency": "PT1H",
+      "queryPeriod": "P90D",
+      "triggerOperator": "GreaterThan",
+      "triggerThreshold": 0
+    },
+    {
+      "id": "rule-4-priv-group",
+      "name": "Monitoring Privileged Group Membership Changes",
+      "file": "../rules/Rule4-PrivilegedGroupChanges.kql",
+      "severity": "Medium",
+      "enabled": true,
+      "mitreTactics": ["Persistence", "PrivilegeEscalation"],
+      "mitreTechniques": ["T1098", "T1098.007"],
+      "queryFrequency": "PT1H",
+      "queryPeriod": "P2D",
+      "triggerOperator": "GreaterThan",
+      "triggerThreshold": 0
+    },
+    {
+      "id": "rule-5-ai-recon",
+      "name": "Detecting AI-Assisted Reconnaissance",
+      "file": "../rules/Rule5-AI-AssistedReconnaissance.kql",
+      "severity": "High",
+      "enabled": true,
+      "mitreTactics": ["Discovery", "Reconnaissance"],
+      "mitreTechniques": ["T1590", "T1087"],
+      "queryFrequency": "PT1H",
+      "queryPeriod": "PT1H",
+      "triggerOperator": "GreaterThan",
+      "triggerThreshold": 0
+    }
+  ]
+}
