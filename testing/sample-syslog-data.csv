@@ -1,0 +1,16 @@
+TimeGenerated,HostName,Facility,SeverityLevel,SyslogMessage,ProcessName
+2026-07-06T09:15:00Z,ubuntu-virtual-machine,auth,6,"pam_unix(sudo:session): session opened for user root by admin(uid=0)",sudo
+2026-07-06T09:16:12Z,ubuntu-virtual-machine,auth,4,"pam_unix(sshd:auth): authentication failure; logname= uid=0 euid=0 tty=ssh ruser= rhost=10.0.0.5",sshd
+2026-07-06T09:17:45Z,ubuntu-virtual-machine,authpriv,6,"sudoers: policy modification detected for user bob",sudo
+2026-07-06T09:18:30Z,prod-server-01,daemon,6,"krb5kdc: AS-REQ from 10.0.0.20 for user svc_backup@CORP.LOCAL",krb5kdc
+2026-07-06T09:19:10Z,prod-server-01,daemon,6,"KDC: TGT issued for AZUREADSSOACC$@CORP.LOCAL",krb5kdc
+2026-07-06T09:20:00Z,dc-01,local4,6,"slapd[1234]: ldapsearch base='DC=corp,DC=local' filter='(objectClass=user)'",slapd
+2026-07-06T09:21:15Z,dc-01,local4,6,"openldap: directory replication request from 10.0.0.30",slapd
+2026-07-06T09:22:30Z,ubuntu-virtual-machine,auth,6,"usermod: group 'docker' added to user attacker1",usermod
+2026-07-06T09:23:45Z,ubuntu-virtual-machine,auth,6,"gpasswd: user bob added to group sudo",gpasswd
+2026-07-06T09:24:00Z,prod-server-01,daemon,6,"ldapsearch: batch query #1",ldapsearch
+2026-07-06T09:24:02Z,prod-server-01,daemon,6,"ldapsearch: batch query #2",ldapsearch
+2026-07-06T09:24:04Z,prod-server-01,daemon,6,"ldapsearch: batch query #3",ldapsearch
+2026-07-06T09:24:06Z,prod-server-01,daemon,6,"ldapsearch: batch query #4",ldapsearch
+2026-07-06T09:24:08Z,prod-server-01,daemon,6,"ldapsearch: batch query #5",ldapsearch
+2026-07-06T09:25:00Z,ubuntu-virtual-machine,auth,6,"permitrootlogin updated in sshd_config",sshd
