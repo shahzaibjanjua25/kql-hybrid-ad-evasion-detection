@@ -124,3 +124,4 @@ MIT License — see [LICENSE](LICENSE).
 - Black Hat USA 2025 (Dirk-jan Mollema) for foundational research on hybrid AD lateral movement
 - Microsoft CTI-REALM benchmarking framework
 - Community KQL detection repositories
+
