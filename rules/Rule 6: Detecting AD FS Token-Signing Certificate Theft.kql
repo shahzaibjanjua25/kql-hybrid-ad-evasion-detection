@@ -1,0 +1,50 @@
+// ============================================================
+// Rule 6: Detecting AD FS Token-Signing Certificate Theft
+// ============================================================
+// Description: Identifies suspicious export or abnormal usage of
+// AD FS token-signing certificates in hybrid environments. Attackers
+// steal these certificates to forge SAML tokens and impersonate any
+// user, bypassing MFA and conditional access.
+//
+// MITRE ATT&CK: T1552.004 (Unsecured Credentials: Private Keys)
+//               T1606.002 (Forge Web Credentials: SAML Tokens)
+// Data Source: Windows Security Events, Syslog (AD FS servers)
+// Author: [Your Name / Team]
+// Validated: [To be validated]
+//
+// TUNING:
+// - Adjust the time window (ago(24h)) based on your baseline
+// - Modify the list of privileged accounts in `AdfsServiceAccounts`
+// - Add known-good certificate thumbprints to `KnownThumbprints`
+// - Exclude maintenance windows or approved admin activity via
+//   `where Account !in (...)` or `where HostName !in (...)`
+// ============================================================
+
+let AdfsServiceAccounts = dynamic(["svc_adfs", "adfs_svc", "adfsfarm"]);
+let KnownThumbprints = dynamic(["<legitimate-thumbprint-1>", "<legitimate-thumbprint-2>"]);
+let SuspiciousExportCommands = dynamic(["Export-PfxCertificate", "certutil -exportPFX", "Export Certificate", "backup key"]);
+let TimeWindow = 24h;
+
+// 1. Detect certificate export events on AD FS servers
+SecurityEvent
+| where TimeGenerated > ago(TimeWindow)
+| where EventID in (5058, 5061)  // 5058: Key file operation, 5061: Cryptographic operation
+| where SubjectUserName in (AdfsServiceAccounts) or SubjectUserName endswith "$"
+| where EventID == 5058
+| extend Thumbprint = extract(@"Thumbprint:\s*([A-Fa-f0-9]+)", 1, EventData)
+| where Thumbprint !in (KnownThumbprints)
+| extend AlertReason = "ADFS token-signing certificate export detected"
+| project TimeGenerated, HostName, SubjectUserName, Thumbprint, EventID, AlertReason
+
+// 2. Detect abnormal certificate usage (token signing with non-standard key)
+| union (
+    SecurityEvent
+    | where TimeGenerated > ago(TimeWindow)
+    | where EventID == 5061
+    | where SubjectUserName in (AdfsServiceAccounts)
+    | extend Thumbprint = extract(@"Thumbprint:\s*([A-Fa-f0-9]+)", 1, EventData)
+    | where Thumbprint !in (KnownThumbprints)
+    | extend AlertReason = "ADFS token-signing with non-whitelisted certificate"
+    | project TimeGenerated, HostName, SubjectUserName, Thumbprint, EventID, AlertReason
+)
+| order by TimeGenerated desc
