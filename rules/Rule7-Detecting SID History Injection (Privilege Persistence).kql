@@ -1,0 +1,65 @@
+// ============================================================
+// Rule 7: Detecting SID History Injection
+// ============================================================
+// Description: Identifies attempts to inject SID History into user or
+// computer objects. SID History allows an attacker to retain access to
+// resources after compromising (or being removed from) a privileged
+// account — a classic AD persistence and privilege-escalation technique
+// frequently abused in hybrid environments to bridge on-prem and cloud.
+//
+// MITRE ATT&CK: T1134.005 (Access Token Manipulation: SID-History Injection)
+//               T1098      (Account Manipulation)
+// Data Source: Windows Security Events (Domain Controller audit logs)
+// Author: [Your Name / Team]
+// Validated: [To be validated]
+//
+// TUNING:
+// - Populate `ApprovedSidHistory` with legitimate migration SIDs (ADMT)
+// - Populate `PrivilegedSIDs` with well-known admin SIDs (e.g., -500, -512, -519)
+// - Exclude approved migration windows / service accounts via `where`
+// - Adjust `TimeWindow` to match your log ingestion latency
+// ============================================================
+
+let TimeWindow = 24h;
+// Well-known privileged SIDs (Domain/Enterprise/Schema Admins, krbtgt, Administrator)
+let PrivilegedSIDs = dynamic([
+    "S-1-5-21-*-500", "S-1-5-21-*-512", "S-1-5-21-*-518",
+    "S-1-5-21-*-519", "S-1-5-21-*-502", "S-1-5-32-544"
+]);
+// Approved SID History entries from legitimate migrations (ADMT, etc.)
+let ApprovedSidHistory = dynamic(["<approved-sid-1>", "<approved-sid-2>"]);
+// Accounts permitted to perform SID History writes
+let ApprovedOperators = dynamic(["svc_admt", "<approved-admin>"]);
+
+// 1. Detect SID History modifications via Directory Service Access auditing (EventID 5136)
+SecurityEvent
+| where TimeGenerated > ago(TimeWindow)
+| where EventID == 5136
+| where ObjectClass == "user" or ObjectClass == "computer" or ObjectClass == "group"
+| where AttributeLDAPDisplayName == "sIDHistory"
+| extend NewSidHistory = extract(@"Value:\s*(S-1-5-21-[0-9-]+)", 1, EventData)
+| where NewSidHistory !in (ApprovedSidHistory)
+| where SubjectUserName !in (ApprovedOperators)
+| extend
+    IsPrivilegedSid = NewSidHistory has_any (PrivilegedSIDs),
+    AlertReason = "SID History injection detected on AD object"
+| project TimeGenerated, Computer, SubjectUserName, ObjectDN, NewSidHistory,
+          IsPrivilegedSid, AlertReason, EventID
+
+// 2. Correlate with post-injection privileged logon using the injected SID
+| join kind=leftouter (
+    SecurityEvent
+    | where TimeGenerated > ago(TimeWindow)
+    | where EventID == 4624
+    | where LogonType in (3, 10)  // Network / RemoteInteractive
+    | extend UserSid = extract(@"User SID:\s*(S-1-5-21-[0-9-]+)", 1, EventData)
+    | project TimeGenerated, Computer, Account, UserSid
+) on $left.NewSidHistory == $right.UserSid
+| extend
+    PostInjectionLogon = isnotempty(Account),
+    AlertReason = iff(isnotempty(Account),
+        "SID History injection followed by privileged logon (high confidence)",
+        "SID History injection detected (medium confidence)")
+| project TimeGenerated, Computer, SubjectUserName, ObjectDN, NewSidHistory,
+          IsPrivilegedSid, PostInjectionLogon, Account, AlertReason
+| order by PostInjectionLogon desc, TimeGenerated desc
