@@ -1,0 +1,70 @@
+// ============================================================
+// Rule 8: Detecting DCShadow (Rogue Domain Controller Registration)
+// ============================================================
+// Description: Identifies the registration of a rogue Domain Controller
+// (DCShadow) by monitoring for the creation of nTDSDSA objects and the
+// assignment of Directory Replication Service (DRS) SPNs to non-DC hosts.
+// DCShadow allows attackers to inject malicious AD changes (e.g., SID
+// History, ACLs, credentials) through replication, bypassing native
+// change logs and evading most SIEM detections.
+//
+// MITRE ATT&CK: T1207 (Rogue Domain Controller)
+// Data Source: Windows Security Events (Domain Controller audit logs)
+// Author: [Your Name / Team]
+// Validated: [To be validated]
+//
+// TUNING:
+// - Populate `KnownDomainControllers` with FQDNs of your legitimate DCs
+// - Populate `ApprovedSPNComputers` with computers allowed to hold GC/ SPNs
+//   (usually only DCs, but some environments have exceptions)
+// - Exclude approved DC promotion/demotion windows via `where TimeGenerated`
+// - Adjust `TimeWindow` to match your log ingestion latency
+// - Requires "Audit Directory Service Changes" policy on DCs
+// ============================================================
+
+let TimeWindow = 24h;
+// Populate with your legitimate Domain Controller computer names
+let KnownDomainControllers = dynamic(["DC01", "DC02", "DC03"]);
+// GUID for DRS Remote Protocol SPN interface
+let DrsSpnGuid = "E3514235-4B06-11D1-AB04-00C04FC2DCD2";
+
+// 1. Detect creation of nTDSDSA objects (DC registration footprint)
+SecurityEvent
+| where TimeGenerated > ago(TimeWindow)
+| where EventID in (5137, 5141)  // Object creation / deletion
+| where ObjectClass == "nTDSDSA"
+| extend TargetComputer = extract(@"CN=([^,]+)", 1, ObjectDN)
+| where TargetComputer !in (KnownDomainControllers)
+| extend
+    AlertReason = "nTDSDSA object created for non-DC host (possible DCShadow registration)",
+    Confidence = "High"
+| project TimeGenerated, Computer, SubjectUserName, TargetComputer, ObjectDN, EventID, AlertReason, Confidence
+
+// 2. Detect DRS-related SPN assignment to non-DC computers
+| union (
+    SecurityEvent
+    | where TimeGenerated > ago(TimeWindow)
+    | where EventID == 4742  // Computer account changed
+    | where ServicePrincipalNames has "GC/" or ServicePrincipalNames has DrsSpnGuid
+    | extend TargetComputer = extract(@"CN=([^,]+)", 1, TargetUserName)
+    | where TargetComputer !in (KnownDomainControllers)
+    | extend
+        AlertReason = "DRS SPN assigned to non-DC computer (possible DCShadow preparation)",
+        Confidence = "High"
+    | project TimeGenerated, Computer, SubjectUserName, TargetComputer, EventID, AlertReason, Confidence
+)
+// 3. Detect SPN attribute modification via 5136 (fallback if 4742 not available)
+| union (
+    SecurityEvent
+    | where TimeGenerated > ago(TimeWindow)
+    | where EventID == 5136
+    | where AttributeLDAPDisplayName == "servicePrincipalName"
+    | where AttributeValue has "GC/" or AttributeValue has DrsSpnGuid
+    | extend TargetComputer = extract(@"CN=([^,]+)", 1, ObjectDN)
+    | where TargetComputer !in (KnownDomainControllers)
+    | extend
+        AlertReason = "DRS SPN attribute modified on non-DC object (possible DCShadow)",
+        Confidence = "Medium"
+    | project TimeGenerated, Computer, SubjectUserName, TargetComputer, EventID, AlertReason, Confidence
+)
+| order by TimeGenerated desc
