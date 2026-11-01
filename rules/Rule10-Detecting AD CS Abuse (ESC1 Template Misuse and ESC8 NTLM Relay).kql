@@ -1,0 +1,124 @@
+// ============================================================
+// Rule10-Detecting AD CS Abuse (ESC1 Template Misuse and ESC8 NTLM Relay).kql
+// ============================================================
+// Description: Detects abuse of Active Directory Certificate Services
+// (AD CS) via two high-impact escalation paths:
+//   ESC1 — Requesting a certificate from a template that allows
+//          enrollee-supplied subject / SAN and Client Authentication
+//          EKU, enabling impersonation of any user (incl. Domain Admin).
+//   ESC8 — NTLM relay to the AD CS Web Enrollment / CES HTTP endpoint
+//          to obtain a certificate for a coerced machine account.
+// Both paths yield a certificate that authenticates as a privileged
+// identity (PKINIT / Schannel), bridging on-prem compromise into
+// Entra ID via certificate-based auth and bypassing password/MFA.
+//
+// MITRE ATT&CK: T1649 (Steal or Forge Authentication Certificates)
+//               T1557.001 (Adversary-in-the-Middle: NTLM Relay)
+//               T1098    (Account Manipulation)
+// Data Source: Windows Security Events (CA servers + DCs), IIS logs
+// Author: [Your Name / Team]
+// Validated: [To be validated]
+//
+// TUNING:
+// - Populate `VulnerableTemplates` with ESC1-vulnerable template names
+//   discovered via Certipy / PSPKIAudit in YOUR environment
+// - Populate `ApprovedEnrollers` with accounts legitimately allowed to
+//   request certs from those templates
+// - Populate `AdcsServers` with your CA / Web Enrollment hosts
+// - Populate `ApprovedRelaySources` with known NTLM relay test hosts
+// - Requires: CA audit logging (EventID 4886/4887), DC 4768 (PKINIT),
+//   IIS access logs forwarded to Sentinel
+// ============================================================
+
+let TimeWindow = 24h;
+let CorrelationWindow = 1h;
+// ESC1-vulnerable templates (from Certipy/PSPKIAudit baseline)
+let VulnerableTemplates = dynamic(["UserTemplate", "MachineTemplate", "<vuln-template>"]);
+let ApprovedEnrollers = dynamic(["svc_enroll", "<approved-admin>"]);
+let AdcsServers = dynamic(["CA01", "CA02", "WEBENROLL01"]);
+let ApprovedRelaySources = dynamic(["<test-host>"]);
+
+// ------------------------------------------------------------------
+// 1. ESC1 — Certificate issued from a vulnerable template (CA event 4887)
+// ------------------------------------------------------------------
+let Esc1Issuance =
+    SecurityEvent
+    | where TimeGenerated > ago(TimeWindow)
+    | where EventID == 4887                              // Certificate Services issued a certificate
+    | where Computer in (AdcsServers)
+    | extend TemplateName = extract(@"Certificate Template:\s*([^\r\n]+)", 1, EventData)
+    | where TemplateName in (VulnerableTemplates)
+    | extend Requester = extract(@"Requester:\s*([^\r\n]+)", 1, EventData)
+    | where Requester !in (ApprovedEnrollers)
+    | extend
+        TargetIdentity = extract(@"Subject:\s*CN=([^,\r\n]+)", 1, EventData),
+        SerialNumber  = extract(@"Serial Number:\s*([^\r\n]+)", 1, EventData)
+    | project IssueTime = TimeGenerated, CA = Computer, Requester,
+              TargetIdentity, TemplateName, SerialNumber, EventID;
+
+// ------------------------------------------------------------------
+// 2. ESC8 — NTLM relay to AD CS HTTP endpoint (IIS log / 4624 type 3)
+//    Detects inbound NTLM auth to the CA's /certsrv or /certsrv/mscep
+//    from a non-approved source, plus a follow-on cert issuance.
+// ------------------------------------------------------------------
+let Esc8Relay =
+    SecurityEvent
+    | where TimeGenerated > ago(TimeWindow)
+    | where EventID == 4624
+    | where LogonType == 3
+    | where AuthenticationPackageName == "NTLM"
+    | where Computer in (AdcsServers)
+    | where IpAddress !in (ApprovedRelaySources)
+    | where Account endswith "$"                          // machine account = classic relay target
+    | extend
+        RelaySource = IpAddress,
+        TargetMachine = Account,
+        AlertReason = "NTLM auth to AD CS HTTP endpoint from non-approved source (possible ESC8 relay)"
+    | project RelayTime = TimeGenerated, CA = Computer, TargetMachine,
+              RelaySource, AlertReason, EventID;
+
+// ------------------------------------------------------------------
+// 3. Correlate: issued cert followed by PKINIT TGT for the cert subject
+//    Confirms the certificate is being USED (high confidence).
+// ------------------------------------------------------------------
+let PkinitLogons =
+    SecurityEvent
+    | where TimeGenerated > ago(TimeWindow)
+    | where EventID == 4768
+    | where tostring(PreAuthType) == "16"                // PKINIT
+    | project AuthTime = TimeGenerated, Account, AuthDC = Computer;
+
+// --- ESC1 chain ---
+let Esc1Chain =
+    Esc1Issuance
+    | join kind=leftouter PkinitLogons on $left.TargetIdentity == $right.Account
+    | where isnull(AuthTime) or AuthTime between (IssueTime .. (IssueTime + CorrelationWindow))
+    | extend
+        PostIssuancePkinit = isnotempty(AuthTime),
+        AlertReason = iff(isnotempty(AuthTime),
+            "ESC1: cert from vulnerable template followed by PKINIT TGT (HIGH confidence)",
+            "ESC1: cert issued from vulnerable template (hunting lead)"),
+        Confidence = iff(isnotempty(AuthTime), "High", "Medium")
+    | project IssueTime, AuthTime, PostIssuancePkinit, CA, Requester,
+              TargetIdentity, TemplateName, SerialNumber, AlertReason, Confidence;
+
+// --- ESC8 chain: relay + issuance within window ---
+let Esc8Chain =
+    Esc8Relay
+    | join kind=inner (
+        Esc1Issuance
+        | project IssueTime, CA = CA, Requester, TargetIdentity, SerialNumber
+    ) on $left.CA == $right.CA
+    | where IssueTime between (RelayTime .. (RelayTime + CorrelationWindow))
+    | extend
+        PostRelayIssuance = true,
+        AlertReason = "ESC8: NTLM relay to AD CS HTTP endpoint followed by cert issuance (HIGH confidence)",
+        Confidence = "High"
+    | project RelayTime, IssueTime, CA, TargetMachine, RelaySource,
+              TargetIdentity, SerialNumber, AlertReason, Confidence;
+
+// ------------------------------------------------------------------
+// 4. Union both chains
+// ------------------------------------------------------------------
+union Esc1Chain, Esc8Chain
+| order by Confidence desc, coalesce(IssueTime, RelayTime) desc
