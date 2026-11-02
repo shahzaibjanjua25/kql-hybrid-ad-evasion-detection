@@ -1,0 +1,121 @@
+// ============================================================
+// Rule11-Detecting Kerberos Delegation Abuse (RBCD and S4U Chain).kql
+// ============================================================
+// Description: Detects abuse of Kerberos delegation for lateral movement
+// and privilege escalation. Covers two primary attack paths:
+//
+//   RBCD — Attackers with write access to a computer object's
+//   msDS-AllowedToActOnBehalfOfOtherIdentity attribute configure
+//   Resource-Based Constrained Delegation to impersonate any user
+//   (including Domain Admin) to the target machine. Legitimate writes
+//   are extremely rare and should be change-managed.
+//
+//   S4U2self / S4U2proxy — Attackers abuse Service-for-User (S4U)
+//   Kerberos extensions to obtain forwardable service tickets for
+//   arbitrary users. Correlating S4U2self (forwardable ticket request)
+//   with S4U2proxy (transmitted service) reveals the full exploitation
+//   chain used by tools like Rubeus and Impacket.
+//
+// MITRE ATT&CK: T1558 (Steal or Forge Kerberos Tickets)
+//               T1134.001 (Token Impersonation/Theft)
+//               T1098    (Account Manipulation)
+// Data Source: Windows Security Events (Domain Controller audit logs)
+// Author:       Shah Zaib Sajid
+//
+// TUNING:
+// - Populate `ApprovedRBCDOperators` with Tier-0 admins authorized to
+//   configure RBCD via documented change management
+// - Populate `LegitDelegationAccounts` with machine accounts that
+//   legitimately use S4U (SQL, Exchange, IIS pools, etc.)
+// - Set `CorrelationWindow` to cover S4U2self → S4U2proxy chain
+// - Requires: Audit Kerberos Service Ticket Operations (4769) and
+//   Audit Directory Service Changes (5136) on all DCs
+// ============================================================
+
+let TimeWindow = 24h;
+let CorrelationWindow = 5m;
+// S4U ticket option flags indicating forwardable / proxy tickets
+let S4UTicketOptions = dynamic(["0x40810010", "0x40800010", "0x50800000"]);
+// Tier-0 admins allowed to write RBCD attributes (customize)
+let ApprovedRBCDOperators = dynamic(["svc_tier0", "<approved-admin>"]);
+// Machine accounts with legitimate S4U usage (SQL, Exchange, etc.)
+let LegitDelegationAccounts = dynamic(["MSSQL", "SQLSVC", "EXCHANGE"]);
+
+// ------------------------------------------------------------------
+// 1. RBCD — msDS-AllowedToActOnBehalfOfOtherIdentity modified (5136)
+//    Legitimate writes are rare; non-Tier-0 writes are critical.
+// ------------------------------------------------------------------
+let RBCDWrites =
+    SecurityEvent
+    | where TimeGenerated > ago(TimeWindow)
+    | where EventID == 5136
+    | where AttributeLDAPDisplayName == "msDS-AllowedToActOnBehalfOfOtherIdentity"
+    | where SubjectUserName !in (ApprovedRBCDOperators)
+    | extend TargetComputer = extract(@"CN=([^,]+)", 1, ObjectDN)
+    | extend
+        AlertReason = "RBCD attribute modified on computer object (possible delegation abuse)",
+        Confidence = "High"
+    | project WriteTime = TimeGenerated, DC = Computer, Actor = SubjectUserName,
+              TargetComputer, TargetDN = ObjectDN, AlertReason, Confidence;
+
+// ------------------------------------------------------------------
+// 2. S4U2self — machine accounts requesting forwardable service tickets (4769)
+// ------------------------------------------------------------------
+let S4USelf =
+    SecurityEvent
+    | where TimeGenerated > ago(TimeWindow)
+    | where EventID == 4769
+    | where AccountName endswith "$"                    // machine accounts
+    | where TicketOptions in (S4UTicketOptions)
+    | where Status == "0x0"                             // success only
+    | where not (AccountName startswith_cs "MSSQL"
+              or AccountName startswith_cs "SQLSVC"
+              or AccountName startswith_cs "EXCHANGE")
+    | extend
+        RequestingMachine = AccountName,
+        ImpersonatedUser = TargetUserName,
+        TargetService = ServiceName
+    | project SelfTime = TimeGenerated, DC = Computer, RequestingMachine,
+              ImpersonatedUser, TargetService;
+
+// ------------------------------------------------------------------
+// 3. S4U2proxy — transmitted service ticket chain (4769 with TransmittedServices)
+// ------------------------------------------------------------------
+let S4UProxy =
+    SecurityEvent
+    | where TimeGenerated > ago(TimeWindow)
+    | where EventID == 4769
+    | where Status == "0x0"
+    | where isnotempty(TransmittedServices) and TransmittedServices != "-"
+    | where not (ServiceName contains "exchangeMDB"
+              or ServiceName contains "exchangeRFR"
+              or ServiceName contains "exchangeAB")
+    | project ProxyTime = TimeGenerated, DC = Computer, AccountName,
+              FinalService = ServiceName, EvidenceTicket = TransmittedServices;
+
+// ------------------------------------------------------------------
+// 4. Correlate S4U2self → S4U2proxy within short window (full chain)
+// ------------------------------------------------------------------
+let S4UChain =
+    S4USelf
+    | join kind=inner S4UProxy on $left.RequestingMachine == $right.AccountName
+    | where ProxyTime between (SelfTime .. (SelfTime + CorrelationWindow))
+    | extend
+        AlertReason = "S4U2self followed by S4U2proxy (full delegation exploitation chain)",
+        Confidence = "High"
+    | project SelfTime, ProxyTime, DC, RequestingMachine, ImpersonatedUser,
+              TargetService, FinalService, AlertReason, Confidence;
+
+// ------------------------------------------------------------------
+// 5. Union: RBCD writes, S4U chains, and orphan S4U2proxy
+// ------------------------------------------------------------------
+union
+    RBCDWrites,
+    S4UChain,
+    (S4UProxy
+        | extend
+            AlertReason = "S4U2proxy ticket with TransmittedServices (delegation abuse indicator)",
+            Confidence = "Medium"
+        | project ProxyTime, DC, AccountName, FinalService, EvidenceTicket,
+                  AlertReason, Confidence)
+| order by Confidence desc, coalesce(WriteTime, SelfTime, ProxyTime) desc
