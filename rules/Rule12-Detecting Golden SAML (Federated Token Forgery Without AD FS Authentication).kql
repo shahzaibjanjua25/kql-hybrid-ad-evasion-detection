@@ -1,0 +1,98 @@
+// ============================================================
+// Rule12-Detecting Golden SAML (Federated Token Forgery Without AD FS Authentication).kql
+// ============================================================
+// Description: Detects Golden SAML attacks — the forging of SAML tokens
+// offline using a stolen AD FS token-signing certificate. The forged
+// token is presented directly to the resource (Entra ID / O365 / AWS /
+// Salesforce) WITHOUT any corresponding authentication event on AD FS.
+//
+// Detection strategy: correlate federated sign-ins in Entra ID
+// (SigninLogs) with AD FS authentication events (4624 LogonType 3 on
+// AD FS hosts). A successful federated sign-in that has NO matching
+// AD FS authentication within a short window is a strong indicator of
+// an offline-forged token (Golden SAML).
+//
+// This rule complements Rule 6:
+//   Rule 6  → detects theft / export of the token-signing certificate.
+//   Rule 12 → detects the moment the stolen certificate is USED.
+//
+// MITRE ATT&CK: T1606.002 (Forge Web Credentials: SAML Tokens)
+//               T1550.001 (Use Alternate Authentication Material: App Access Token)
+//               T1552.004 (Unsecured Credentials: Private Keys)
+// Data Source: SigninLogs (Azure AD), SecurityEvent (4624 on AD FS hosts)
+// Author:       Shah Zaib Sajid
+// Validated: [To be validated]
+//
+// TUNING:
+// - Populate `AdfsServers` with FQDNs of all AD FS farm members
+// - Populate `AppAllowlist` with apps that legitimately federate without
+//   AD FS (rare — usually only when using other IdPs)
+// - Set `CorrelationWindow` to tolerate AD FS log ingestion latency
+//   (default 15m — increase if you see FP from delayed ingestion)
+// - Populate `KnownAdfsEgressIps` if you want to also flag sign-ins
+//   originating from IPs that are not your AD FS farm
+// - Run in HUNTING mode first for 1–2 weeks to establish baseline
+//   latency between SigninLogs and AD FS 4624 events
+// ============================================================
+
+let TimeWindow = 24h;
+let CorrelationWindow = 15m;      // tolerance for AD FS log latency
+let AdfsServers = dynamic(["ADFS01", "ADFS02"]);
+let AppAllowlist = dynamic(["<app-that-legitimately-skips-adfs>"]);
+
+// ------------------------------------------------------------------
+// 1. Federated sign-ins from Entra ID (SigninLogs)
+//    Successful, federated (FederatedCredentialId present), in scope
+// ------------------------------------------------------------------
+let FederatedSignins =
+    SigninLogs
+    | where TimeGenerated > ago(TimeWindow)
+    | where ResultType == 0
+    | where isnotempty(FederatedCredentialId)
+    | where AppDisplayName !in (AppAllowlist)
+    | project SigninTime          = TimeGenerated,
+              UserPrincipalName,
+              AppDisplayName,
+              FederatedCredentialId,
+              CorrelationId,
+              IPAddress,
+              Location,
+              UserAgent            = tostring(DeviceDetail.browser),
+              DeviceDisplayName    = tostring(DeviceDetail.displayName);
+
+// ------------------------------------------------------------------
+// 2. AD FS authentication events (network logon on AD FS hosts)
+//    LogonType 3 = Network logon (typical AD FS WS-Trust / SAML auth)
+// ------------------------------------------------------------------
+let AdfsAuths =
+    SecurityEvent
+    | where TimeGenerated > ago(TimeWindow)
+    | where Computer in (AdfsServers)
+    | where EventID == 4624
+    | where LogonType == 3
+    | project AdfsTime   = TimeGenerated,
+              AdfsUser   = tostring(Account),
+              AdfsServer = tostring(Computer),
+              AdfsIp     = tostring(IpAddress);
+
+// ------------------------------------------------------------------
+// 3. Correlate: federated sign-in WITH matching AD FS auth = normal
+//    federated sign-in WITHOUT matching AD FS auth = suspected forgery
+// ------------------------------------------------------------------
+FederatedSignins
+| join kind=leftouter (
+    AdfsAuths
+    | extend UserPrincipalName = AdfsUser
+) on UserPrincipalName
+| where isnull(AdfsTime)
+        or AdfsTime !between (SigninTime - CorrelationWindow .. SigninTime + 5m)
+| extend
+    NoAdfsEvent = isnull(AdfsTime),
+    AlertReason = iff(isnull(AdfsTime),
+        "Golden SAML suspected: federated sign-in with NO AD FS authentication event",
+        "Federated sign-in with AD FS auth outside expected window (possible token replay / forgery)"),
+    Confidence  = iff(isnull(AdfsTime), "High", "Medium")
+| project SigninTime, UserPrincipalName, AppDisplayName, FederatedCredentialId,
+          IPAddress, Location, UserAgent, DeviceDisplayName,
+          AdfsTime, AdfsServer, NoAdfsEvent, AlertReason, Confidence
+| order by Confidence desc, SigninTime desc
